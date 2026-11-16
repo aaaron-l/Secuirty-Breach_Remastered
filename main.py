@@ -945,15 +945,7 @@ def find_next_intersection(player_cell, heading, grid):
         neighbors = get_open_neighbors(current, grid)
 
         if len(neighbors) >= 3:
-            if previous is None:
-                return current, heading
-
-            incoming = (
-                current[0] - previous[0],
-                current[1] - previous[1]
-            )
-
-            return current, incoming
+            return current
 
         forward = [
             neighbor for neighbor in neighbors
@@ -961,10 +953,7 @@ def find_next_intersection(player_cell, heading, grid):
         ]
 
         if not forward:
-            if previous is None:
-                return None, None
-
-            return None, None
+            return None
 
         next_cell = max(
             forward,
@@ -1020,7 +1009,7 @@ def get_blocker_target(player, grid, blocker_index=0):
     player_cell = get_cell(player.x, player.y)
     heading = player.heading
 
-    intersection, _ = find_next_intersection(
+    intersection = find_next_intersection(
         player_cell, heading, grid
     )
 
@@ -1479,7 +1468,7 @@ def create_round(score):
 # main game loop
 
 async def main():
-    score = 0
+    score = 5
 
     (
         grid, keys, doors, player, npcs,
