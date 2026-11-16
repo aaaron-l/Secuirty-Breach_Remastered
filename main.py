@@ -1468,7 +1468,7 @@ def create_round(score):
 # main game loop
 
 async def main():
-    score = 5
+    score = 0
 
     (
         grid, keys, doors, player, npcs,
