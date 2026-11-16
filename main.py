@@ -173,23 +173,26 @@ def make_imperfect_maze(grid, door_edges):
             if y < GRID_SIZE - 1 and cell.walls[2]:
                 walls.append(((x, y), (x, y + 1)))
 
+    protected_cells = set()
+
+    for door_edge in door_edges:
+        for x, y in door_edge:
+            protected_cells.add((x, y))
+
+            for dx, dy in [(0, -1), (1, 0), (0, 1), (-1, 0)]:
+                nx = x + dx
+                ny = y + dy
+
+                if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE:
+                    protected_cells.add((nx, ny))
+
     safe_walls = []
 
     for a, b in walls:
-        edge = get_edge_key(a, b)
-
-        if edge in door_edges:
+        if a in protected_cells or b in protected_cells:
             continue
 
-        adjacent_to_door = False
-
-        for door_edge in door_edges:
-            if a in door_edge or b in door_edge:
-                adjacent_to_door = True
-                break
-
-        if not adjacent_to_door:
-            safe_walls.append((a, b))
+        safe_walls.append((a, b))
 
     remove_count = int(len(safe_walls) * 0.30)
 
@@ -501,10 +504,9 @@ class Player(Entity):
         self.frame = 0
         self.animation_timer = 0
 
-        self.history = deque(maxlen=64)
-        self.history.append((x, y))
-
         self.intersection_history = deque(maxlen=30)
+        self.previous_cell = (x, y)
+        self.heading = (0, 1)
 
     def get_movement(self):
         keys = pygame.key.get_pressed()
@@ -582,7 +584,11 @@ class Player(Entity):
 
     def update(self, grid, dt, doors, escape_mode, blockers):
         dx, dy = self.get_movement()
-        moving = dx != 0 or dy != 0
+        if dx != 0 or dy != 0:
+            self.heading = (dx, dy)
+            moving = True
+        else:
+            moving = False
 
         if dx != 0:
             self.direction = "right" if dx > 0 else "left"
@@ -620,27 +626,19 @@ class Player(Entity):
             0 <= new_cell[0] < GRID_SIZE and
             0 <= new_cell[1] < GRID_SIZE
         ):
-            if self.history[-1] != new_cell:
-                self.history.append(new_cell)
+            if self.previous_cell != new_cell:
+                previous = self.previous_cell
 
-                if len(self.history) >= 3:
-                    previous = self.history[-2]
-                    incoming_cell = self.history[-3]
+                if len(get_open_neighbors(previous, grid)) >= 3:
+                    outgoing = (
+                        new_cell[0] - previous[0],
+                        new_cell[1] - previous[1]
+                    )
 
-                    if len(get_open_neighbors(previous, grid)) >= 3:
-                        incoming = (
-                            previous[0] - incoming_cell[0],
-                            previous[1] - incoming_cell[1]
-                        )
+                    if abs(outgoing[0]) + abs(outgoing[1]) == 1:
+                        self.intersection_history.append(outgoing)
 
-                        outgoing = (
-                            new_cell[0] - previous[0],
-                            new_cell[1] - previous[1]
-                        )
-
-                        self.intersection_history.append(
-                            (previous, incoming, outgoing)
-                        )
+                self.previous_cell = new_cell
 
         if moving:
             self.animation_timer += dt
@@ -735,7 +733,7 @@ class NPC(Entity):
         self.animation_timer = 0
 
         self.repath_timer = 0
-        self.markov_timer = 0
+        self.markov_timer = 5.0
 
         self.previous_cell = None
 
@@ -743,13 +741,12 @@ class NPC(Entity):
         start = get_cell(self.x, self.y)
 
         if not (0 <= start[0] < GRID_SIZE and 0 <= start[1] < GRID_SIZE):
+            self.path = []
+            self.path_index = 0
             return
 
-        path = a_star(start, target, grid)
-
-        if path:
-            self.path = path
-            self.path_index = 1 if len(path) > 1 else 0
+        self.path = a_star(start, target, grid)
+        self.path_index = 1 if len(self.path) > 1 else len(self.path)
 
     def move(self, dt):
         if not self.path or self.path_index >= len(self.path):
@@ -865,16 +862,16 @@ def create_basic_npc(player):
     )
 
 
-def create_npcs(round_number, player, grid):
+def create_npcs(score, player, grid):
     spawn = get_cell(player.x, player.y)
 
-    if round_number == 1:
+    if score + 1 == 1:
         kinds = ["hunter"]
-    elif round_number == 2:
+    elif score + 1 == 2:
         kinds = ["hunter", "ambusher"]
-    elif round_number == 3:
+    elif score + 1 == 3:
         kinds = ["hunter", "ambusher", "interceptor"]
-    elif round_number < 10:
+    elif score + 1 < 10:
         kinds = ["hunter", "ambusher", "interceptor", "blocker"]
     else:
         kinds = [
@@ -980,20 +977,12 @@ def find_next_intersection(player_cell, heading, grid):
         previous = current
         current = next_cell
 
-def predict_intersection_exit(intersection, incoming, history, grid):
-    local_choices = defaultdict(float)
-    global_choices = defaultdict(float)
+def predict_intersection_exit(intersection, heading, history, grid, blocker_index=0):
+    direction_choices = defaultdict(float)
 
-    for i, (recorded_intersection, recorded_incoming, outgoing) in enumerate(history):
+    for i, outgoing in enumerate(history):
         weight = i + 1
-
-        global_choices[outgoing] += weight
-
-        if (
-            recorded_intersection == intersection and
-            recorded_incoming == incoming
-        ):
-            local_choices[outgoing] += weight
+        direction_choices[outgoing] += weight
 
     available = [
         (
@@ -1003,49 +992,35 @@ def predict_intersection_exit(intersection, incoming, history, grid):
         for neighbor in get_open_neighbors(intersection, grid)
     ]
 
-    choices = {
-        direction: count
-        for direction, count in local_choices.items()
-        if direction in available
-    }
+    forward = [
+        direction for direction in available
+        if direction[0] * heading[0] +
+        direction[1] * heading[1] >= 0
+    ]
 
-    if not choices:
-        choices = {
-            direction: count
-            for direction, count in global_choices.items()
-            if direction in available
-        }
+    if forward:
+        available = forward
 
-    if choices:
-        best_count = max(choices.values())
+    if not available:
+        return None
 
-        best_directions = [
-            direction
-            for direction, count in choices.items()
-            if count == best_count
-        ]
+    available.sort(
+        key=lambda direction: (
+            direction_choices[direction],
+            direction[0] * heading[0] +
+            direction[1] * heading[1]
+        ),
+        reverse=True
+    )
 
-        return choice(best_directions)
-
-    if incoming in available:
-        return incoming
-
-    return choice(available) if available else None
+    return available[blocker_index % len(available)]
 
 
-def get_blocker_target(player, grid):
+def get_blocker_target(player, grid, blocker_index=0):
     player_cell = get_cell(player.x, player.y)
+    heading = player.heading
 
-    directions = {
-        "up": (0, -1),
-        "right": (1, 0),
-        "down": (0, 1),
-        "left": (-1, 0)
-    }
-
-    heading = directions[player.direction]
-
-    intersection, incoming = find_next_intersection(
+    intersection, _ = find_next_intersection(
         player_cell, heading, grid
     )
 
@@ -1054,9 +1029,10 @@ def get_blocker_target(player, grid):
 
     outgoing = predict_intersection_exit(
         intersection,
-        incoming,
+        heading,
         player.intersection_history,
-        grid
+        grid,
+        blocker_index
     )
 
     if outgoing is None:
@@ -1079,24 +1055,55 @@ def update_npcs(npcs, player, grid, doors_by_edge, dt):
     ):
         return
 
+    blockers = [
+        npc for npc in npcs
+        if npc.kind == "blocker"
+    ]
+
+    blocker_index = 0
+
     for npc in npcs:
-        # basic npc explores independently of the player
         if npc.kind == "basic":
             move_basic_npc(npc, grid, doors_by_edge, dt)
             continue
 
         npc.repath_timer += dt
 
-        # blocker follows the predicted intersection exit
-
         if npc.kind == "blocker":
             npc.markov_timer += dt
 
-            if npc.markov_timer >= 20 or npc.path_index >= len(npc.path):
+            if npc.markov_timer >= 5.0:
+                target = get_blocker_target(
+                    player, grid, blocker_index
+                )
+
+                npc.set_path(target, grid)
                 npc.markov_timer = 0
 
-                target = get_blocker_target(player, grid)
-                npc.set_path(target, grid)
+            blocker_index += 1
+
+            old_x = npc.x
+            old_y = npc.y
+            old_path_index = npc.path_index
+
+            npc.move(dt)
+
+            blocked = circle_rect_collision(
+                player.x, player.y, player.radius, npc.rect
+            )
+
+            for other in blockers:
+                if other is not npc and npc.rect.colliderect(other.rect):
+                    blocked = True
+                    break
+
+            if blocked:
+                npc.x = old_x
+                npc.y = old_y
+                npc.path_index = old_path_index
+                npc.rect.center = (round(old_x), round(old_y))
+
+            continue
 
         elif npc.kind == "hunter":
             if npc.repath_timer >= 1.0 or not npc.path:
@@ -1115,7 +1122,9 @@ def update_npcs(npcs, player, grid, doors_by_edge, dt):
                 if distance <= 4:
                     target = player_cell
                 else:
-                    target = get_path_ahead(player, 4, grid, doors_by_edge)
+                    target = get_path_ahead(
+                        player, 4, grid, doors_by_edge
+                    )
 
                 npc.set_path(target, grid)
 
@@ -1131,7 +1140,9 @@ def update_npcs(npcs, player, grid, doors_by_edge, dt):
                 if distance <= 4:
                     target = player_cell
                 else:
-                    target = get_path_ahead(player, 4, grid, doors_by_edge)
+                    target = get_path_ahead(
+                        player, 4, grid, doors_by_edge
+                    )
 
                 npc.set_path(target, grid)
 
@@ -1348,9 +1359,9 @@ def draw_sonar_map(grid, keys, doors, player, npcs):
     return surface
 
 
-def draw_hud(surface, score, round_number):
+def draw_hud(surface, score):
     text = small_font.render(
-        f"Round: {round_number}    Escapes: {score}",
+        f"Round: {score + 1}    Escapes: {score}",
         True, (255, 255, 255)
     )
 
@@ -1440,14 +1451,13 @@ def draw_elite_warning(surface, timer):
 
 # round setup
 
-def create_round(round_number):
+def create_round(score):
     start = choice(EDGES)
 
     grid, keys, doors = generate_maze(start)
 
     player = Player(*start)
 
-    # spawns the basic npc with the player
     npcs = [create_basic_npc(player) for _ in range(5)]
 
     world_surface = pygame.Surface(
@@ -1470,12 +1480,11 @@ def create_round(round_number):
 
 async def main():
     score = 0
-    round_number = 1
 
     (
         grid, keys, doors, player, npcs,
         world_surface, overview
-    ) = create_round(round_number)
+    ) = create_round(score)
 
     doors_by_edge = {
         door.edge: door for door in doors
@@ -1524,12 +1533,11 @@ async def main():
                 if event.key == pygame.K_SPACE and state in ("win", "lose"):
                     if state == "lose":
                         score = 0
-                        round_number = 1
 
                     (
                         grid, keys, doors, player, npcs,
                         world_surface, overview
-                    ) = create_round(round_number)
+                    ) = create_round(score)
 
                     doors_by_edge = {
                         door.edge: door for door in doors
@@ -1558,6 +1566,9 @@ async def main():
             # basic npc keeps roaming before the diamond is collected
             update_npcs(npcs, player, grid, doors_by_edge, dt)
 
+            if check_enemy_collision(player, npcs):
+                state = "lose"
+
             collect_keys(player, keys)
 
             goal_x, goal_y = cell_center(GOAL)
@@ -1581,9 +1592,9 @@ async def main():
 
                 # adds elites without removing the basic npc
                 npcs.extend(
-                    create_npcs(round_number, player, grid)
+                    create_npcs(score, player, grid)
                 )
-
+                
                 warning_timer = ELITE_WARNING_TIME
                 state = "alert"
 
@@ -1617,7 +1628,7 @@ async def main():
                 camera_x, camera_y
             )
 
-            draw_hud(screen, score, round_number)
+            draw_hud(screen, score)
 
         # elite warning
 
@@ -1663,14 +1674,13 @@ async def main():
             if check_enemy_collision(player, npcs):
                 state = "lose"
 
-            if (
+            elif (
                 player.x < 0 or
                 player.y < 0 or
                 player.x > MAP_WIDTH or
                 player.y > MAP_HEIGHT
             ):
                 score += 1
-                round_number += 1
                 state = "win"
 
             camera_x, camera_y = get_camera(player)
@@ -1700,7 +1710,7 @@ async def main():
             )
 
             draw_hud(
-                screen, score, round_number - 1
+                screen, score
             )
 
         # win and lose screens
